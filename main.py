@@ -1,10 +1,16 @@
+import logging
+
 from config import *
 from sqlalchemy import create_engine
 from sqlalchemy.orm import DeclarativeBase, mapped_column
 from sqlalchemy.orm import Mapped, Session
 import requests
 from bs4 import BeautifulSoup
+import asyncio
+import aiohttp
+from aiohttp import ClientSession
 import time
+import re
 
 engine = create_engine(STR_CONNECTION)
 
@@ -71,7 +77,6 @@ def task1():
 
 
 def one_vacancy_json(url):
-    # user_agent = {'User-agent': 'Mozilla/5.0'}
     result = requests.get(url)
     if result.status_code == 200:
         vacancy = result.json()
@@ -114,11 +119,49 @@ def task2():
             print(vacancy)
             session.add(vacancy)
             session.commit()
-        #time.sleep(1)
 
 
-def task2_star():
-    pass
+def get_vacancies_id():
+    url_all = f'https://api.hh.ru/vacancies?text=middle python developer&per_page={V}'
+    result = requests.get(url_all)
+    vacancies = result.json().get('items')
+    vacancy_lst = [re.sub('[^0-9]', '', d['url']) for d in vacancies]
+    return vacancy_lst
+
+
+async def get_vacancy(id, session):
+    url = f'/vacancies/{id}'
+
+    #logging.debug(f"Начата загрузка вакансии{id}")
+    async with session.get(url=url) as response:
+        vacancy_json = await response.json()
+        #logging.debug(f"Закончена загрузка вакансии{id}")
+        return vacancy_json
+
+
+async def task3(ids):
+    url_all = 'https://api.hh.ru/'
+    async with ClientSession(url_all) as session:
+        tasks = []
+        for id in ids:
+            tasks.append(asyncio.create_task(get_vacancy(id, session)))
+        results = await asyncio.gather(*tasks)
+
+    for result in results:
+        key_skills = result['key_skills']
+        if key_skills:
+            key_skills_spis = ','.join([d['name'] for d in key_skills])
+        else:
+            key_skills_spis = '-'
+        print(key_skills_spis)
+        vacancy = Vacancies(company_name=result['employer']['name'], position=result['name'],
+                            job_description=result['description'],
+                            key_skills=key_skills_spis)
+
+        with Session(engine) as session:
+            print(vacancy)
+            session.add(vacancy)
+            session.commit()
 
 
 if __name__ == '__main__':
@@ -129,7 +172,18 @@ if __name__ == '__main__':
     # task1()
 
     print("Задание 2.")
-    #task2()
+    # task2()
 
-    # print("Задание 2 со звездочкой.")
-    # task2_star()
+    print("Задание 2 со звездочкой.")
+    logging.info('Задание 2 со звездочкой.')
+    vacansies_id = get_vacancies_id()
+    logging.info(f'id вакансий={vacansies_id}')
+
+    start = time.time()
+    try:
+        asyncio.run(task3(vacansies_id))
+    except Exception as ex:
+        print(ex)
+        logging.error('Error asyncio', exc_info=True)
+
+    print('время выполнения=', time.time() - start)
