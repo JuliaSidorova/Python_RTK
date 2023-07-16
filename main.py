@@ -1,5 +1,3 @@
-import logging
-
 from config import *
 from sqlalchemy import create_engine
 from sqlalchemy.orm import DeclarativeBase, mapped_column
@@ -7,7 +5,6 @@ from sqlalchemy.orm import Mapped, Session
 import requests
 from bs4 import BeautifulSoup
 import asyncio
-import aiohttp
 from aiohttp import ClientSession
 import time
 import re
@@ -132,10 +129,10 @@ def get_vacancies_id():
 async def get_vacancy(id, session):
     url = f'/vacancies/{id}'
 
-    #logging.debug(f"Начата загрузка вакансии{id}")
+    # logging.debug(f"Начата загрузка вакансии{id}")
     async with session.get(url=url) as response:
         vacancy_json = await response.json()
-        #logging.debug(f"Закончена загрузка вакансии{id}")
+        # logging.debug(f"Закончена загрузка вакансии{id}")
         return vacancy_json
 
 
