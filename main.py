@@ -1,186 +1,158 @@
-from config import *
-from sqlalchemy import create_engine
-from sqlalchemy.orm import DeclarativeBase, mapped_column
-from sqlalchemy.orm import Mapped, Session
+from datetime import datetime, timedelta
+from airflow import DAG
+from airflow.utils.dates import days_ago
+from airflow.operators.python import PythonOperator
+from airflow.providers.sqlite.operators.sqlite import SqliteOperator
+from airflow.providers.sqlite.hooks.sqlite import SqliteHook
+
+import json
+import zipfile
+import logging
 import requests
-from bs4 import BeautifulSoup
-import asyncio
-from aiohttp import ClientSession
-import time
-import re
+from collections import Counter
 
-engine = create_engine(STR_CONNECTION)
-
-
-class Base(DeclarativeBase):
-    pass
+default_args = {
+    'owner': 'Sidorova',
+    'retries': 5,
+    'retry_delay': timedelta(minutes=5)
+}
 
 
-class Vacancies(Base):
-    __tablename__ = TABLE_LAB2
+def get_data_from_file():
+    import pandas as pd
 
-    id: Mapped[int] = mapped_column(primary_key=True)
-    company_name: Mapped[str]
-    position: Mapped[str]
-    job_description: Mapped[str]
-    key_skills: Mapped[str]
+    logger = logging.getLogger(__name__)
 
-    def __repr__(self):
-        return (f"{self.company_name}//{self.position}//{self.job_description}//{self.key_skills}")
+    sqlite_hook = SqliteHook(sqlite_get_conn='sqlite_default')
+    connection = sqlite_hook.get_conn()
 
+    logger.info('Соединение с БД успешно!')
 
-def one_vacancy(url):
-    user_agent = {'User-agent': 'Mozilla/5.0'}
-    result = requests.get(url, headers=user_agent)
-    if result.status_code == 200:
-        soup = BeautifulSoup(result.content.decode(), 'lxml')
+    path_to_file = '/home/rtstudent/egrul.json.zip'
 
-        name_vacancy = soup.find('h1')
-        name_company = soup.find('a', attrs={'data-qa': 'vacancy-company-name'})
-        name_descr = soup.find('div', attrs={'data-qa': 'vacancy-description'})
+    f = 0
 
-        lst_key = []
-        name_keys = soup.find_all("span", attrs={'data-qa': 'bloko-tag__text'})
-        for key in name_keys:
-            lst_key.append(key.text)
-        name_key_skills = ",".join(lst_key)
+    with zipfile.ZipFile(path_to_file, 'r') as zip_object:
+        name_list = zip_object.namelist()
+        for name in name_list:
+            with zip_object.open(name) as file:
+                json_data = file.read()
+                data = json.loads(json_data)
 
-        return [my_decode(name_company), my_decode(name_vacancy), my_decode(name_descr), name_key_skills]
+                logger.info(f'Запись в БД из файла={f}')
+                try:
+                    df = pd.DataFrame.from_dict(pd.json_normalize(data), orient='columns')
 
+                    if {"ogrn", "inn", "kpp", "name", "data.СвОКВЭД.СвОКВЭДОсн.КодОКВЭД"}.issubset(df.columns):
+                        df = df[["ogrn", "inn", "kpp", "name", "data.СвОКВЭД.СвОКВЭДОсн.КодОКВЭД"]]
+                        df.columns = ["ogrn", "inn", "kpp", "name", "okved"]
 
-def task1():
-    # url_all = 'https://izhevsk.hh.ru/vacancies/middle-python-developer'
-    url_all = 'https://hh.ru/search/vacancy?text=python+middle+developer&items_on_page=10'
-    user_agent = {'User-agent': 'Mozilla/5.0'}
-    n_page = 0
-    while n_page < 10:
-        result = requests.get(url_all + '&page=' + str(n_page), headers=user_agent)
-        if result.status_code == 200:
+                        df = df[df['okved'].str.startswith('61', na=False)]
 
-            soup = BeautifulSoup(result.content.decode(), 'lxml')
-            all_href = soup.find_all("a", attrs={'data-qa': 'serp-item__title'})
-            for res in all_href:
-                urls = res.text, res.attrs.get('href')
-                lst_res = one_vacancy(urls[1])
+                        df.to_sql('sid_telecom_companies', con=connection, if_exists='append', index=False)
+                    else:
+                        logger.info(f"{name} - Нет нужного столбца")
+                        f = f + 1
 
-                vacancy = Vacancies(company_name=lst_res[0], position=lst_res[1], job_description=lst_res[2],
-                                    key_skills=lst_res[3])
-
-                with Session(engine) as session:
-                    print(vacancy)
-                    session.add(vacancy)
-                    session.commit()
-        n_page = n_page + 1
+                except Exception as error:
+                    logger.debug(f'{error}')
 
 
-def one_vacancy_json(url):
-    result = requests.get(url)
-    if result.status_code == 200:
-        vacancy = result.json()
+def get_data_from_hh():
+    logger = logging.getLogger(__name__)
 
-        name_vacancy = vacancy['name']
-        print(name_vacancy)
+    sqlite_hook = SqliteHook(sqlite_get_conn='sqlite_default')
+    connection = sqlite_hook.get_conn()
 
-        name_company = vacancy['employer']['name']
-        print(name_company)
+    logger.info('Соединение с БД успешно!')
 
-        name_descr = vacancy['description']
-        print(name_descr)
-
-        key_skills = vacancy['key_skills']
-        if key_skills:
-            key_skills_spis = ','.join([d['name'] for d in key_skills])
-            print(key_skills_spis)
-        else:
-            key_skills_spis = '-'
-
-        return [name_company, name_vacancy, name_descr, key_skills_spis]
-
-
-def task2():
-    url_all = 'https://api.hh.ru/vacancies?text=middle python developer&per_page=100'
-    result = requests.get(url_all)
-    print(result.status_code)
-    print(result.json())
-    vacancies = result.json().get('items')
-    print(vacancies)
-    for i, vacancy in enumerate(vacancies):
-        print(i + 1, vacancy['name'], vacancy['url'], vacancy['alternate_url'])
-
-        # lst_res = one_vacancy_json('https://api.hh.ru/vacancies/82987200?host=hh.ru')
-        lst_res = one_vacancy_json(vacancy['url'])
-        vacancy = Vacancies(company_name=lst_res[0], position=lst_res[1], job_description=lst_res[2],
-                            key_skills=lst_res[3])
-
-        with Session(engine) as session:
-            print(vacancy)
-            session.add(vacancy)
-            session.commit()
-
-
-def get_vacancies_id():
-    url_all = f'https://api.hh.ru/vacancies?text=middle python developer&per_page={V}'
-    result = requests.get(url_all)
-    vacancies = result.json().get('items')
-    vacancy_lst = [re.sub('[^0-9]', '', d['url']) for d in vacancies]
-    return vacancy_lst
-
-
-async def get_vacancy(id, session):
-    url = f'/vacancies/{id}'
-
-    # logging.debug(f"Начата загрузка вакансии{id}")
-    async with session.get(url=url) as response:
-        vacancy_json = await response.json()
-        # logging.debug(f"Закончена загрузка вакансии{id}")
-        return vacancy_json
-
-
-async def task3(ids):
-    url_all = 'https://api.hh.ru/'
-    async with ClientSession(url_all) as session:
-        tasks = []
-        for id in ids:
-            tasks.append(asyncio.create_task(get_vacancy(id, session)))
-        results = await asyncio.gather(*tasks)
-
-    for result in results:
-        key_skills = result['key_skills']
-        if key_skills:
-            key_skills_spis = ','.join([d['name'] for d in key_skills])
-        else:
-            key_skills_spis = '-'
-        print(key_skills_spis)
-        vacancy = Vacancies(company_name=result['employer']['name'], position=result['name'],
-                            job_description=result['description'],
-                            key_skills=key_skills_spis)
-
-        with Session(engine) as session:
-            print(vacancy)
-            session.add(vacancy)
-            session.commit()
-
-
-if __name__ == '__main__':
-    Base.metadata.create_all(engine)
-    print("Лабораторная работа №2.")
-
-    print("Задание 1.")
-    # task1()
-
-    print("Задание 2.")
-    # task2()
-
-    print("Задание 2 со звездочкой.")
-    logging.info('Задание 2 со звездочкой.')
-    vacansies_id = get_vacancies_id()
-    logging.info(f'id вакансий={vacansies_id}')
-
-    start = time.time()
     try:
-        asyncio.run(task3(vacansies_id))
-    except Exception as ex:
-        print(ex)
-        logging.error('Error asyncio', exc_info=True)
+        url_all = 'https://api.hh.ru/vacancies?text=middle python developer&per_page=30'
+        result = requests.get(url_all)
 
-    print('время выполнения=', time.time() - start)
+        vacancies = result.json().get('items')
+
+        for i, vacancy in enumerate(vacancies):
+            logger.info(i + 1, vacancy['name'], vacancy['url'], vacancy['alternate_url'])
+
+            result = requests.get(vacancy['url'])
+
+            vacancy = result.json()
+            name_vacancy = vacancy['name']
+            name_company = vacancy['employer']['name']
+            name_descr = vacancy['description']
+            key_skills = vacancy['key_skills']
+            if key_skills:
+                key_skills_spis = ','.join([d['name'] for d in key_skills])
+                print(key_skills_spis)
+            else:
+                key_skills_spis = '-'
+
+            rows = [(name_company, name_vacancy, name_descr, key_skills_spis), ]
+            fields = ['company_name', 'position', 'job_description', 'key_skills']
+            logger.info(f'ЗАПИСЬ ДАННЫХ  - {rows}')
+            sqlite_hook.insert_rows(table='sid_vacancies', rows=rows, target_fields=fields)
+
+    except Exception as error:
+        logger.debug(f'{error}')
+
+
+def count_keyskills():
+    sqlite_hook = SqliteHook(sqlite_get_conn='sqlite_default')
+    connection = sqlite_hook.get_conn()
+
+    cur = connection.cursor()
+    res = cur.execute("SELECT key_skills FROM sid_vacancies")
+    arr = res.fetchall()
+
+    result = []
+    for n, x in enumerate(arr):
+        array = []
+        array = arr[n][0].replace("[", "").replace("\'", "").replace("]", "")
+        array = array.split(',')
+        result = result + array
+
+    print('РЕЗУЛЬТАТ РАБОТЫ = ', sorted(dict(Counter(result)).items(), key=lambda x: x[1])[-10:])
+
+
+with DAG(
+        dag_id='sidorova_dag',
+        default_args=default_args,
+        start_date=datetime(2023, 8, 12),
+        schedule_interval='@daily'
+) as dag:
+    create_table_for_okved = SqliteOperator(
+        task_id='create_table_for_okved',
+        sqlite_conn_id='sqlite_default',
+        sql='''CREATE TABLE IF NOT EXISTS sid_telecom_companies (ogrn varchar, 
+                                                            inn varchar,
+                                                            kpp varchar,
+                                                            name varchar,
+                                                            okved varchar);'''
+    )
+
+    create_table_for_vacancies = SqliteOperator(
+        task_id='create_table_for_vacancies',
+        sqlite_conn_id='sqlite_default',
+        sql='''CREATE TABLE IF NOT EXISTS sid_vacancies (company_name varchar,
+                                                        position varchar,
+                                                        job_description text,
+                                                        key_skills varchar);'''
+    )
+
+    get_okved_data = PythonOperator(
+        task_id='get_data_from_file',
+        python_callable=get_data_from_file,
+    )
+
+    get_vacancy_data = PythonOperator(
+        task_id='get_data_from_hh',
+        python_callable=get_data_from_hh,
+    )
+
+    count_key_skills = PythonOperator(
+        task_id='count_keyskills',
+        python_callable=count_keyskills,
+    )
+
+    create_table_for_okved >> create_table_for_vacancies >> get_okved_data >> get_vacancy_data >> count_key_skills
